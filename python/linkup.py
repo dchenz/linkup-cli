@@ -16,6 +16,10 @@ events_endpoint = "https://dev-api.linkupevents.com.au/events?uni=unsw"
 events_last_updated_endpoint = (
     "https://dev-api.linkupevents.com.au/last-updated?uni=unsw"
 )
+clubs_paged_endpoint = "https://api.linkupevents.com.au/unsw/clubs?page="
+
+default_events_header = ["name", "hosts", "start", "finish"]
+default_clubs_header = ["name", "short_name", "facebook"]
 
 date_format = r"%Y-%m-%d %H:%M"
 
@@ -40,9 +44,30 @@ event_column_value_mappings = {
     "description": lambda event: event["description"].replace("\n", " "),
 }
 
+club_column_value_mappings = {
+    "short_name": lambda club: (
+        club["club_shorthand"] if club["club_shorthand"] != club["club_name"] else ""
+    ),
+    "name": lambda club: club["club_name"],
+    "description": lambda club: club["description"].replace("\n", " "),
+    "tags": lambda club: ", ".join(club["tags"]),
+    "email": lambda club: (
+        club["socials"]["email"] if "email" in club["socials"] else ""
+    ),
+    "website": lambda club: (
+        club["socials"]["website"] if "website" in club["socials"] else ""
+    ),
+    "facebook": lambda club: (
+        club["socials"]["facebook_page"] if "facebook_page" in club["socials"] else ""
+    ),
+    "facebook_group": lambda club: (
+        club["socials"]["facebook_group"] if "facebook_group" in club["socials"] else ""
+    ),
+}
 
-def valid_columns(columns: list[str]):
-    return all(x in event_column_value_mappings for x in columns)
+
+def valid_columns(columns: list[str], mappings: dict):
+    return all(x in mappings for x in columns)
 
 
 def parse_args():
@@ -74,19 +99,32 @@ def parse_args():
     )
     events_parser.add_argument("--limit", type=int, help="Maximum rows to display")
     events_parser.add_argument("--sort-by", nargs="+")
-    events_parser.add_argument("--columns", nargs="+", help="Columns to display")
+    events_parser.add_argument("--columns", nargs="+")
 
     clubs_parser = subs.add_parser("clubs")
+    clubs_parser.add_argument(
+        "--page", type=int, default=1, help="Page number (default 1)"
+    )
     # Search by ID
     clubs_parser.add_argument("--id", help="Club's ID on LinkUp or Facebook")
     # or, filter on these fields
     clubs_parser.add_argument("--name")
-    clubs_parser.add_argument("--description")
-    clubs_parser.add_argument("--category")
-    clubs_parser.add_argument("--tags", nargs="+")
-    clubs_parser.add_argument("--fees-arc", type=int)
-    clubs_parser.add_argument("--fees-non-arc", type=int)
-    clubs_parser.add_argument("--fees-associate", type=int)
+    clubs_parser.add_argument("--categories", nargs="+")
+    m = clubs_parser.add_mutually_exclusive_group()
+    m.add_argument(
+        "--has-fees", action="store_true", help="Show clubs with member fees"
+    )
+    m.add_argument(
+        "--no-fees", action="store_true", help="Show clubs without member fees"
+    )
+    clubs_parser.add_argument(
+        "--search",
+        nargs="+",
+        help="Match club if any term is in name, categories or description",
+    )
+    clubs_parser.add_argument("--limit", type=int, help="Maximum rows to display")
+    clubs_parser.add_argument("--sort-by", nargs="+")
+    clubs_parser.add_argument("--columns", nargs="+")
 
     args = parser.parse_args()
 
@@ -94,37 +132,46 @@ def parse_args():
         parser.print_help()
         exit(1)
 
-    if args.limit is not None and args.limit <= 0:
+    mappings = (
+        event_column_value_mappings
+        if args.mode == "events"
+        else club_column_value_mappings
+    )
+
+    if getattr(args, "limit", None) is not None and args.limit <= 0:
         parser.error("--limit must be a positive integer")
 
-    if args.search is not None and (args.name or args.host):
-        parser.error("--search cannot be used with --name or --host")
+    if getattr(args, "search", None) is not None:
+        if getattr(args, "name", None) or getattr(args, "host", None):
+            parser.error("--search cannot be used with --name or --host")
 
-    if args.sort_by is not None:
+    if getattr(args, "sort_by", None) is not None:
         try:
             # Some column names can have underscore prefix
             # for descending sort. Convert args into
             # list[tuple[str, bool]] with sort direction.
-            args.sort_by = validate_sort_columns(args.sort_by)
+            args.sort_by = validate_sort_columns(args.sort_by, mappings)
         except ValueError as e:
             parser.error(str(e))
 
-    if args.columns is not None:
-        if valid_columns(args.columns):
-            args.columns = list(set(args.columns))
+    if getattr(args, "page", None) is not None and args.page <= 0:
+        parser.error("--page must be a positive integer")
+
+    if getattr(args, "columns", None) is not None:
+        if valid_columns(args.columns, mappings):
+            # Remove duplicate columns
+            args.columns = list(dict.fromkeys(args.columns))
         else:
-            parser.error(
-                "Valid columns: " + ", ".join(event_column_value_mappings.keys())
-            )
+            parser.error("Valid columns: " + ", ".join(mappings.keys()))
 
     return args
 
 
-def validate_sort_columns(sort_by_columns: list[str]) -> list[tuple[str, bool]]:
+def validate_sort_columns(sort_by: list[str], mappings: dict) -> list[tuple[str, bool]]:
     # Strip prefixes and determine sort direction
     sort_by_directions = []
     check_dupes = {}
-    for col in sort_by_columns:
+    for col in sort_by:
         if col.startswith("_"):
             col = col[1:]
             if check_dupes.get(col) == False:
@@ -143,10 +190,8 @@ def validate_sort_columns(sort_by_columns: list[str]) -> list[tuple[str, bool]]:
                 sort_by_directions.append((col, False))
                 check_dupes[col] = False
 
-    if not valid_columns([x[0] for x in sort_by_directions]):
-        raise ValueError(
-            "Valid columns: " + ", ".join(event_column_value_mappings.keys())
-        )
+    if not valid_columns([x[0] for x in sort_by_directions], mappings):
+        raise ValueError("Valid columns: " + ", ".join(mappings.keys()))
     return sort_by_directions
 
 
@@ -208,7 +253,7 @@ def fetch_last_update_time() -> Optional[str]:
         pass
 
 
-def normalise_event(event: dict):
+def normalise_event(event: dict) -> dict:
     event["time_start"] = datetime.fromisoformat(event["time_start"])
     event["time_finish"] = datetime.fromisoformat(event["time_finish"])
     event["hosts_image"] = []
@@ -222,38 +267,61 @@ def normalise_event(event: dict):
     return event
 
 
-def event_to_table_row(
-    event: dict, column_order: list, max_width: Optional[int] = None
-):
-    order = column_order if column_order else event_column_value_mappings.keys()
-    row = []
-    for column in order:
-        mapf = event_column_value_mappings[column]
-        text = mapf(event)
-        displayed_text = text
+def object_to_table_row(
+    obj: dict, columns: list, mappings: dict, max_width: Optional[int] = None
+) -> list[str]:
+    if not columns:
+        raise ValueError
+    row_values = []
+    for column in columns:
+        mapf = mappings[column]
+        displayed_text = mapf(obj)
         if max_width and max_width > 10:
             displayed_text = displayed_text[:max_width]
-        row.append(displayed_text)
-    return row
+        row_values.append(displayed_text)
+    return row_values
 
 
-def pprint_table(table: list[list[str]], has_header: bool = False):
+def pprint_table(
+    table: list[list[str]], has_header: bool = False, has_footer: bool = False
+):
+    table = list(table)
     col_width = [max(len(x) for x in col) for col in zip(*table)]
+    table_width = sum(col_width) + 3 * len(col_width) + 1
+
+    header = None
+    if has_header:
+        header = table.pop(0)
+
+    footer = None
+    if has_footer:
+        footer = table.pop()
+
+    if len(table) == 0:
+        table.append(["" for _ in col_width])
+
+    pprint_row = lambda row: print(
+        "| "
+        + " | ".join("{:{}}".format(x, col_width[i]) for i, x in enumerate(row))
+        + " |"
+    )
+
+    if header:
+        print("-" * table_width)
+        pprint_row(header)
+        print("-" * table_width)
+
     for line in table:
-        line_content = (
-            "| "
-            + " | ".join("{:{}}".format(x, col_width[i]) for i, x in enumerate(line))
-            + " |"
-        )
-        if has_header:
-            print("-" * len(line_content))
-        print(line_content)
-        if has_header:
-            print("-" * len(line_content))
-            has_header = False
+        pprint_row(line)
+
+    print("-" * table_width)
+
+    if footer:
+        pprint_row(footer)
+        print("-" * table_width)
 
 
-def filter_events(events: list[dict], args: argparse.Namespace):
+def filter_events(events: list[dict], args: argparse.Namespace) -> list[dict]:
     if not (
         args.name or args.host or args.before or args.after or args.date or args.search
     ):
@@ -289,41 +357,91 @@ def filter_events(events: list[dict], args: argparse.Namespace):
     return matched
 
 
-def sort_events(events: list[dict], args: argparse.Namespace):
-    # Sort by time_start by default
+def sort_objects(
+    objs: list[dict], args: argparse.Namespace, mappings: dict, default_key: str
+) -> list[dict]:
+    # Sort by default
     if not args.sort_by:
-        return sorted(events, key=event_column_value_mappings["start"])
+        return sorted(objs, key=mappings[default_key])
 
-    def create_sort_key(event: dict) -> tuple:
+    def create_sort_key(obj: dict) -> tuple:
         keys = []
         for col, reverse in args.sort_by:
-            text_value = event_column_value_mappings[col](event)
+            text_value = mappings[col](obj)
             key = tuple((-ord(x) if reverse else ord(x)) for x in text_value)
             keys.append(key)
         return tuple(keys)
 
     # Otherwise, sort by custom ordering
-    return sorted(events, key=create_sort_key)
+    return sorted(objs, key=create_sort_key)
+
+
+def fetch_clubs_paged(page: int) -> tuple[list[dict], int, int]:
+    # Page argument is 1-indexed
+    try:
+        with urlopen(clubs_paged_endpoint + str(page - 1)) as response:
+            response_data = json.loads(response.read())
+            if not response_data["is_success"]:
+                raise RequestError("Failed to load clubs from API")
+            raw_clubs = response_data["clubs"]
+            page_count = response_data["nbPages"]
+            if page > page_count:
+                return fetch_clubs_paged(page_count)
+            return [normalise_club(x) for x in raw_clubs], page, page_count
+    except HTTPError:
+        raise RequestError("Failed to load clubs from API")
+
+
+def normalise_club(club: dict) -> dict:
+    club["tags"].extend(club["categories"])
+    club["tags"].sort()
+    del club["categories"]
+    return club
 
 
 def main(args: argparse.Namespace):
-    header = args.columns if args.columns else ["name", "hosts", "start", "finish"]
     try:
+        table = []
+        header = []
+        footer = None
+        page_no = None
+        page_count = None
         if args.mode == "events":
-
-            table = [header]
+            header.extend(args.columns if args.columns else default_events_header)
+            table.append(header)
             if args.id is not None:
                 event = fetch_event_by_id(args.id)
-                table.append(event_to_table_row(event, header))
+                row = object_to_table_row(event, header, event_column_value_mappings)
+                table.append(row)
             else:
                 events = filter_events(fetch_all_events(), args)
-                events = sort_events(events, args)
+                events = sort_objects(
+                    events, args, event_column_value_mappings, "start"
+                )
                 if args.limit:
                     events = events[: args.limit]
                 for event in events:
-                    table.append(event_to_table_row(event, header, max_width=40))
-            pprint_table(table, has_header=True)
+                    row = object_to_table_row(
+                        event, header, event_column_value_mappings, max_width=40
+                    )
+                    table.append(row)
+        elif args.mode == "clubs":
+            header.extend(args.columns if args.columns else default_clubs_header)
+            table.append(header)
+            clubs, page_no, page_count = fetch_clubs_paged(args.page)
+            clubs = sort_objects(clubs, args, club_column_value_mappings, "name")
+            for club in clubs:
+                row = object_to_table_row(club, header, club_column_value_mappings)
+                table.append(row)
 
+        if page_no and page_count:
+            footer = ["" for _ in header]
+            table.append(footer)
+            footer[0] = f"Page {args.page} / {page_count}"
+
+        pprint_table(
+            table, has_header=header is not None, has_footer=footer is not None
+        )
     except RequestError as e:
         print(e.message)
         exit(1)

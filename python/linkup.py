@@ -1,13 +1,48 @@
+#!/usr/bin/python3
+
 import argparse
 import json
 import os
 from datetime import datetime
 from typing import Optional
+from urllib.error import HTTPError
+from urllib.request import urlopen
 
-import requests
+# File to save cached events data
+cache_path = os.path.join(os.path.expanduser("~"), ".cache", "linkup-cache.json")
 
-home_dir = os.path.expanduser("~")
-cache_path = os.path.join(home_dir, ".cache", "linkup-cache.json")
+event_endpoint = "https://dev-api.linkupevents.com.au/event?id="
+events_endpoint = "https://dev-api.linkupevents.com.au/events?uni=unsw"
+events_last_updated_endpoint = (
+    "https://dev-api.linkupevents.com.au/last-updated?uni=unsw"
+)
+
+date_format = r"%Y-%m-%d %H:%M"
+
+event_column_value_mappings = {
+    "id": lambda event: event["id"],
+    "name": lambda event: event["title"],
+    "start": lambda event: event["time_start"].strftime(date_format),
+    "finish": lambda event: event["time_finish"].strftime(date_format),
+    "location": lambda event: event["location"],
+    "hosts": lambda event: ", ".join(
+        map(
+            lambda x: x["name"],
+            (
+                event["hosts_no_image"]
+                if len(event["hosts_image"]) == 0
+                else event["hosts_image"]
+            ),
+        )
+    ),
+    "categories": lambda event: ", ".join(event["categories"]),
+    "image": lambda event: event["image_url"],
+    "description": lambda event: event["description"].replace("\n", " "),
+}
+
+
+def valid_columns(columns: list[str]):
+    return all(x in event_column_value_mappings for x in columns)
 
 
 def parse_args():
@@ -20,7 +55,6 @@ def parse_args():
     # or, filter on these fields
     events_parser.add_argument("--name")
     m = events_parser.add_mutually_exclusive_group()
-    m = m.add_mutually_exclusive_group()
     m.add_argument(
         "--before", type=datetime.fromisoformat, help="Starts before 2022-01-31T09:30"
     )
@@ -33,7 +67,14 @@ def parse_args():
         help="Starts on 2022-01-31 (time is ignored)",
     )
     events_parser.add_argument("--host")
+    events_parser.add_argument(
+        "--search",
+        nargs="+",
+        help="Match event if any term is in name, hosts or description",
+    )
     events_parser.add_argument("--limit", type=int, help="Maximum rows to display")
+    events_parser.add_argument("--sort-by", nargs="+")
+    events_parser.add_argument("--columns", nargs="+", help="Columns to display")
 
     clubs_parser = subs.add_parser("clubs")
     # Search by ID
@@ -49,13 +90,64 @@ def parse_args():
 
     args = parser.parse_args()
 
-    if args.limit is not None and args.limit <= 0:
-        parser.error("--limit must be a positive integer")
-
     if args.mode is None:
         parser.print_help()
         exit(1)
+
+    if args.limit is not None and args.limit <= 0:
+        parser.error("--limit must be a positive integer")
+
+    if args.search is not None and (args.name or args.host):
+        parser.error("--search cannot be used with --name or --host")
+
+    if args.sort_by is not None:
+        try:
+            # Some column names can have underscore prefix
+            # for descending sort. Convert args into
+            # list[tuple[str, bool]] with sort direction.
+            args.sort_by = validate_sort_columns(args.sort_by)
+        except ValueError as e:
+            parser.error(str(e))
+
+    if args.columns is not None:
+        if valid_columns(args.columns):
+            args.columns = list(set(args.columns))
+        else:
+            parser.error(
+                "Valid columns: " + ", ".join(event_column_value_mappings.keys())
+            )
+
     return args
+
+
+def validate_sort_columns(sort_by_columns: list[str]) -> list[tuple[str, bool]]:
+    # Strip prefixes and determine sort direction
+    sort_by_directions = []
+    check_dupes = {}
+    for col in sort_by_columns:
+        if col.startswith("_"):
+            col = col[1:]
+            if check_dupes.get(col) == False:
+                raise ValueError(
+                    f"Cannot sort both ascending and descending for '{col}'"
+                )
+            if col not in check_dupes:
+                sort_by_directions.append((col, True))
+                check_dupes[col] = True
+        else:
+            if check_dupes.get(col) == True:
+                raise ValueError(
+                    f"Cannot sort both ascending and descending for '{col}'"
+                )
+            if col not in check_dupes:
+                sort_by_directions.append((col, False))
+                check_dupes[col] = False
+
+    if not valid_columns([x[0] for x in sort_by_directions]):
+        raise ValueError(
+            "Valid columns: " + ", ".join(event_column_value_mappings.keys())
+        )
+    return sort_by_directions
 
 
 class RequestError(Exception):
@@ -79,30 +171,41 @@ def save_cached_events(last_updated: str, raw_events: list[dict]):
         with open(cache_path, "w") as f:
             json.dump({"last_updated": last_updated, "events": raw_events}, f)
     except Exception:
-        return None
+        pass
 
 
-def fetch_event_by_id(uid: int):
-    response = requests.get(f"https://dev-api.linkupevents.com.au/event?id={uid}")
-    if not response.ok:
-        raise RequestError(response.text)
-    data = response.json()
-    return normalise_event(data)
+def fetch_event_by_id(uid: int) -> dict:
+    try:
+        with urlopen(event_endpoint + str(uid)) as response:
+            data = json.loads(response.read().decode("utf-8"))
+            return normalise_event(data)
+    except HTTPError:
+        raise RequestError("Event not found")
 
 
-def fetch_all_events():
-    response = requests.get(
-        f"https://dev-api.linkupevents.com.au/last-updated?uni=unsw"
-    )
-    last_updated = response.text
-    raw_events = load_cached_events(last_updated)
+def fetch_all_events() -> list[dict]:
+    last_updated = fetch_last_update_time()
+    if last_updated:
+        raw_events = load_cached_events(last_updated)
+    else:
+        raw_events = None
     if not raw_events:
-        response = requests.get("https://dev-api.linkupevents.com.au/events?uni=unsw")
-        if not response.ok:
+        try:
+            with urlopen(events_endpoint) as response:
+                raw_events = json.loads(response.read().decode("utf-8"))
+                if last_updated:
+                    save_cached_events(last_updated, raw_events)
+        except HTTPError:
             raise RequestError("Failed to load events from API")
-        raw_events = response.json()
-        save_cached_events(last_updated, raw_events)
     return [normalise_event(e) for e in raw_events]
+
+
+def fetch_last_update_time() -> Optional[str]:
+    try:
+        with urlopen(events_last_updated_endpoint) as response:
+            return response.read().decode("utf-8")
+    except HTTPError:
+        pass
 
 
 def normalise_event(event: dict):
@@ -119,39 +222,16 @@ def normalise_event(event: dict):
     return event
 
 
-date_format = r"%Y-%m-%d %H:%M"
-
-
-event_column_value_mappings = {
-    "id": lambda event: event["id"],
-    "name": lambda event: event["title"],
-    "start": lambda event: event["time_start"].strftime(date_format),
-    "finish": lambda event: event["time_finish"].strftime(date_format),
-    "location": lambda event: event["location"],
-    "hosts": lambda event: ", ".join(
-        map(
-            lambda x: x["name"],
-            (
-                event["hosts_no_image"]
-                if len(event["hosts_image"]) == 0
-                else event["hosts_image"]
-            ),
-        )
-    ),
-    "categories": lambda event: ", ".join(event["categories"]),
-    "image": lambda event: event["image_url"],
-    "description": lambda event: event["description"],
-}
-
-
-def event_to_table_row(event: dict, column_order: list, max_width: int = 40):
+def event_to_table_row(
+    event: dict, column_order: list, max_width: Optional[int] = None
+):
     order = column_order if column_order else event_column_value_mappings.keys()
     row = []
     for column in order:
         mapf = event_column_value_mappings[column]
         text = mapf(event)
         displayed_text = text
-        if max_width > 10:
+        if max_width and max_width > 10:
             displayed_text = displayed_text[:max_width]
         row.append(displayed_text)
     return row
@@ -174,15 +254,31 @@ def pprint_table(table: list[list[str]], has_header: bool = False):
 
 
 def filter_events(events: list[dict], args: argparse.Namespace):
-    if not (args.name or args.host or args.before or args.after or args.date):
+    if not (
+        args.name or args.host or args.before or args.after or args.date or args.search
+    ):
         return events
     matched = []
     for event in events:
         if args.name and args.name.lower() not in event["title"].lower():
             continue
-        hosts_text = event_column_value_mappings["hosts"](event)
-        if args.host and args.host.lower() not in hosts_text.lower():
-            continue
+        if args.host:
+            hosts_text = event_column_value_mappings["hosts"](event)
+            if args.host.lower() not in hosts_text.lower():
+                continue
+        if args.search:
+            hosts_text = event_column_value_mappings["hosts"](event)
+            name_text = event_column_value_mappings["name"](event)
+            desc_text = event_column_value_mappings["description"](event)
+            category_text = event_column_value_mappings["categories"](event)
+            search_text = " ".join([hosts_text, name_text, desc_text, category_text])
+            any_matches = False
+            for term in args.search:
+                if term.lower() in search_text.lower():
+                    any_matches = True
+                    break
+            if not any_matches:
+                continue
         if args.before and event["time_start"] >= args.before:
             continue
         if args.after and event["time_start"] <= args.after:
@@ -193,8 +289,25 @@ def filter_events(events: list[dict], args: argparse.Namespace):
     return matched
 
 
+def sort_events(events: list[dict], args: argparse.Namespace):
+    # Sort by time_start by default
+    if not args.sort_by:
+        return sorted(events, key=event_column_value_mappings["start"])
+
+    def create_sort_key(event: dict) -> tuple:
+        keys = []
+        for col, reverse in args.sort_by:
+            text_value = event_column_value_mappings[col](event)
+            key = tuple((-ord(x) if reverse else ord(x)) for x in text_value)
+            keys.append(key)
+        return tuple(keys)
+
+    # Otherwise, sort by custom ordering
+    return sorted(events, key=create_sort_key)
+
+
 def main(args: argparse.Namespace):
-    header = ["name", "hosts", "start", "finish"]
+    header = args.columns if args.columns else ["name", "hosts", "start", "finish"]
     try:
         if args.mode == "events":
 
@@ -204,10 +317,11 @@ def main(args: argparse.Namespace):
                 table.append(event_to_table_row(event, header))
             else:
                 events = filter_events(fetch_all_events(), args)
+                events = sort_events(events, args)
                 if args.limit:
                     events = events[: args.limit]
                 for event in events:
-                    table.append(event_to_table_row(event, header))
+                    table.append(event_to_table_row(event, header, max_width=40))
             pprint_table(table, has_header=True)
 
     except RequestError as e:

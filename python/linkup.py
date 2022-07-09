@@ -98,7 +98,7 @@ def parse_args():
     def add_common_args(subparser: argparse.ArgumentParser):
         subparser.add_argument("--limit", type=int, help="Maximum rows to display")
         subparser.add_argument("--order-by", nargs="+")
-        subparser.add_argument("--columns", nargs="+")
+        subparser.add_argument("--columns", "--select", nargs="+")
         subparser.add_argument(
             "--no-emojis", action="store_true", help="Remove emojis from output"
         )
@@ -146,7 +146,7 @@ def parse_args():
     add_common_args(clubs_parser)
 
     clubs_parser.add_argument(
-        "--page", type=int, default=1, help="Page number (default 1)"
+        "-p", "--page", type=int, default=1, help="Page number (default 1)"
     )
 
     args = parser.parse_args()

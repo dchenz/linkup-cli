@@ -97,7 +97,7 @@ def valid_columns(columns: list[str], mappings: dict):
 def parse_args():
     def add_common_args(subparser: argparse.ArgumentParser):
         subparser.add_argument("--limit", type=int, help="Maximum rows to display")
-        subparser.add_argument("--sort-by", nargs="+")
+        subparser.add_argument("--order-by", nargs="+")
         subparser.add_argument("--columns", nargs="+")
         subparser.add_argument(
             "--no-emojis", action="store_true", help="Remove emojis from output"
@@ -168,12 +168,12 @@ def parse_args():
         if getattr(args, "name", None) or getattr(args, "host", None):
             parser.error("--search cannot be used with --name or --host")
 
-    if getattr(args, "sort_by", None) is not None:
+    if getattr(args, "order_by", None) is not None:
         try:
             # Some column names can have underscore prefix
             # for descending sort. Convert args into
             # list[tuple[str, bool]] with sort direction.
-            args.sort_by = validate_sort_columns(args.sort_by, mappings)
+            args.order_by = validate_sort_columns(args.order_by, mappings)
         except ValueError as e:
             parser.error(str(e))
 
@@ -194,11 +194,13 @@ def parse_args():
     return args
 
 
-def validate_sort_columns(sort_by: list[str], mappings: dict) -> list[tuple[str, bool]]:
+def validate_sort_columns(
+    order_by: list[str], mappings: dict
+) -> list[tuple[str, bool]]:
     # Strip prefixes and determine sort direction
-    sort_by_directions = []
+    order_by_directions = []
     check_dupes = {}
-    for col in sort_by:
+    for col in order_by:
         if col.startswith("_"):
             col = col[1:]
             if check_dupes.get(col) == False:
@@ -206,7 +208,7 @@ def validate_sort_columns(sort_by: list[str], mappings: dict) -> list[tuple[str,
                     f"Cannot sort both ascending and descending for '{col}'"
                 )
             if col not in check_dupes:
-                sort_by_directions.append((col, True))
+                order_by_directions.append((col, True))
                 check_dupes[col] = True
         else:
             if check_dupes.get(col) == True:
@@ -214,12 +216,12 @@ def validate_sort_columns(sort_by: list[str], mappings: dict) -> list[tuple[str,
                     f"Cannot sort both ascending and descending for '{col}'"
                 )
             if col not in check_dupes:
-                sort_by_directions.append((col, False))
+                order_by_directions.append((col, False))
                 check_dupes[col] = False
 
-    if not valid_columns([x[0] for x in sort_by_directions], mappings):
+    if not valid_columns([x[0] for x in order_by_directions], mappings):
         raise ValueError("Valid columns: " + ", ".join(mappings.keys()))
-    return sort_by_directions
+    return order_by_directions
 
 
 class RequestError(Exception):
@@ -427,12 +429,12 @@ def sort_objects(
     objs: list[dict], args: argparse.Namespace, mappings: dict, default_key: str
 ) -> list[dict]:
     # Sort by default
-    if not args.sort_by:
+    if not args.order_by:
         return sorted(objs, key=mappings[default_key])
 
     def create_sort_key(obj: dict) -> tuple:
         keys = []
-        for col, reverse in args.sort_by:
+        for col, reverse in args.order_by:
             text_value = mappings[col](obj)
             key = tuple((-ord(x) if reverse else ord(x)) for x in text_value)
             keys.append(key)

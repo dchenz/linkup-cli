@@ -10,7 +10,10 @@ from urllib.error import HTTPError
 from urllib.request import urlopen
 
 # File to save cached events data
-cache_path = os.path.join(os.path.expanduser("~"), ".cache", "linkup-cache.json")
+cache_path = os.path.join(os.path.expanduser("~"), ".cache", "linkup")
+os.makedirs(cache_path, exist_ok=True)
+
+cache_events_path = os.path.join(cache_path, "events.json")
 
 website_url = "https://linkupevents.com"
 event_endpoint = "https://dev-api.linkupevents.com.au/event?id="
@@ -226,7 +229,7 @@ class RequestError(Exception):
 
 def load_cached_events(last_updated: str) -> Optional[list]:
     try:
-        with open(cache_path, "r") as f:
+        with open(cache_events_path, "r") as f:
             cached = json.load(f)
         if cached["last_updated"] != last_updated:
             return None
@@ -237,7 +240,7 @@ def load_cached_events(last_updated: str) -> Optional[list]:
 
 def save_cached_events(last_updated: str, raw_events: list[dict]):
     try:
-        with open(cache_path, "w") as f:
+        with open(cache_events_path, "w") as f:
             json.dump({"last_updated": last_updated, "events": raw_events}, f)
     except Exception:
         pass

@@ -7,7 +7,7 @@ import re
 from datetime import datetime
 from typing import Optional
 from urllib.error import HTTPError
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 # File to save cached events data
 cache_path = os.path.join(os.path.expanduser("~"), ".cache", "linkup")
@@ -248,9 +248,9 @@ def save_cached_events(last_updated: str, raw_events: list[dict]):
 
 def fetch_event_by_id(uid: int) -> dict:
     try:
-        with urlopen(event_endpoint + str(uid)) as response:
-            data = json.loads(response.read().decode("utf-8"))
-            return normalise_event(data)
+        response_text = request_get(event_endpoint + str(uid))
+        data = json.loads(response_text)
+        return normalise_event(data)
     except HTTPError:
         raise RequestError("Event not found")
 
@@ -263,10 +263,10 @@ def fetch_all_events() -> list[dict]:
         raw_events = None
     if not raw_events:
         try:
-            with urlopen(events_endpoint) as response:
-                raw_events = json.loads(response.read().decode("utf-8"))
-                if last_updated:
-                    save_cached_events(last_updated, raw_events)
+            response_text = request_get(events_endpoint)
+            raw_events = json.loads(response_text)
+            if last_updated:
+                save_cached_events(last_updated, raw_events)
         except HTTPError:
             raise RequestError("Failed to load events from API")
     return [normalise_event(e) for e in raw_events]
@@ -274,8 +274,7 @@ def fetch_all_events() -> list[dict]:
 
 def fetch_last_update_time() -> Optional[str]:
     try:
-        with urlopen(events_last_updated_endpoint) as response:
-            return response.read().decode("utf-8")
+        return request_get(events_last_updated_endpoint)
     except HTTPError:
         pass
 
@@ -292,6 +291,13 @@ def normalise_event(event: dict) -> dict:
             event["hosts_image"].append(host)
     del event["hosts"]
     return event
+
+
+def request_get(url: str) -> str:
+    r = Request(url)
+    r.add_header("User-Agent", "linkup-cli")
+    with urlopen(r) as response:
+        return response.read().decode("utf-8")
 
 
 def object_to_table_row(obj: dict, columns: list, mappings: dict) -> list[str]:
@@ -439,15 +445,15 @@ def sort_objects(
 def fetch_clubs_paged(page: int) -> tuple[list[dict], int, int]:
     # Page argument is 1-indexed
     try:
-        with urlopen(clubs_paged_endpoint + str(page - 1)) as response:
-            response_data = json.loads(response.read())
-            if not response_data["is_success"]:
-                raise RequestError("Failed to load clubs from API")
-            raw_clubs = response_data["clubs"]
-            page_count = response_data["nbPages"]
-            if page > page_count:
-                return fetch_clubs_paged(page_count)
-            return [normalise_club(x) for x in raw_clubs], page, page_count
+        response_text = request_get(clubs_paged_endpoint + str(page - 1))
+        response_data = json.loads(response_text)
+        if not response_data["is_success"]:
+            raise RequestError("Failed to load clubs from API")
+        raw_clubs = response_data["clubs"]
+        page_count = response_data["nbPages"]
+        if page > page_count:
+            return fetch_clubs_paged(page_count)
+        return [normalise_club(x) for x in raw_clubs], page, page_count
     except HTTPError:
         raise RequestError("Failed to load clubs from API")
 

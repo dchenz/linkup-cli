@@ -142,20 +142,6 @@ def parse_args():
     clubs_parser = subs.add_parser("clubs", description=help_text)
     add_common_args(clubs_parser)
 
-    clubs_parser.add_argument("--name")
-    clubs_parser.add_argument("--categories", nargs="+")
-    m = clubs_parser.add_mutually_exclusive_group()
-    m.add_argument(
-        "--has-fees", action="store_true", help="Show clubs with member fees"
-    )
-    m.add_argument(
-        "--no-fees", action="store_true", help="Show clubs without member fees"
-    )
-    clubs_parser.add_argument(
-        "--search",
-        nargs="+",
-        help="Match club if any term is in name, categories or description",
-    )
     clubs_parser.add_argument(
         "--page", type=int, default=1, help="Page number (default 1)"
     )

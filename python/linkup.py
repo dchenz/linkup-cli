@@ -12,6 +12,7 @@ from urllib.request import urlopen
 # File to save cached events data
 cache_path = os.path.join(os.path.expanduser("~"), ".cache", "linkup-cache.json")
 
+website_url = "https://linkupevents.com"
 event_endpoint = "https://dev-api.linkupevents.com.au/event?id="
 events_endpoint = "https://dev-api.linkupevents.com.au/events?uni=unsw"
 events_last_updated_endpoint = (
@@ -105,10 +106,14 @@ def parse_args():
             help="Default will choose best option",
         )
 
-    parser = argparse.ArgumentParser()
+    help_text = (
+        f"Welcome to the LinkUp CLI. A web version is available at {website_url}"
+    )
+    parser = argparse.ArgumentParser(description=help_text)
     subs = parser.add_subparsers(dest="mode")
 
-    events_parser = subs.add_parser("events")
+    help_text = f"A web version is available at {website_url}/events"
+    events_parser = subs.add_parser("events", description=help_text)
     add_common_args(events_parser)
 
     # Searching by ID ignores other filtering options
@@ -133,7 +138,8 @@ def parse_args():
         help="Match event if any term is in name, hosts or description",
     )
 
-    clubs_parser = subs.add_parser("clubs")
+    help_text = f"A web version is available at {website_url}/clubs"
+    clubs_parser = subs.add_parser("clubs", description=help_text)
     add_common_args(clubs_parser)
 
     clubs_parser.add_argument("--name")

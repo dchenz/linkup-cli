@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import re
 from datetime import datetime
 from typing import Optional
 from urllib.error import HTTPError
@@ -18,17 +19,21 @@ events_last_updated_endpoint = (
 )
 clubs_paged_endpoint = "https://api.linkupevents.com.au/unsw/clubs?page="
 
-default_events_header = ["name", "hosts", "start", "finish"]
+default_events_header = ["name", "hosts", "start", "facebook"]
 default_clubs_header = ["name", "short_name", "facebook"]
 
 date_format = r"%Y-%m-%d %H:%M"
 
+# Might be set to True inside parse_args()
+no_emoji_output = False
+
 event_column_value_mappings = {
     "id": lambda event: event["id"],
+    "facebook": lambda event: "https://www.facebook.com/events/" + event["id"],
     "name": lambda event: event["title"],
     "start": lambda event: event["time_start"].strftime(date_format),
     "finish": lambda event: event["time_finish"].strftime(date_format),
-    "location": lambda event: event["location"],
+    "location": lambda event: (event["location"] if event["location"] else ""),
     "hosts": lambda event: ", ".join(
         map(
             lambda x: x["name"],
@@ -41,7 +46,7 @@ event_column_value_mappings = {
     ),
     "categories": lambda event: ", ".join(event["categories"]),
     "image": lambda event: event["image_url"],
-    "description": lambda event: event["description"].replace("\n", " "),
+    "description": lambda event: (event["description"] if event["description"] else ""),
 }
 
 club_column_value_mappings = {
@@ -49,7 +54,7 @@ club_column_value_mappings = {
         club["club_shorthand"] if club["club_shorthand"] != club["club_name"] else ""
     ),
     "name": lambda club: club["club_name"],
-    "description": lambda club: club["description"].replace("\n", " "),
+    "description": lambda club: (club["description"] if club["description"] else ""),
     "tags": lambda club: ", ".join(club["tags"]),
     "email": lambda club: (
         club["socials"]["email"] if "email" in club["socials"] else ""
@@ -65,19 +70,49 @@ club_column_value_mappings = {
     ),
 }
 
+remove_repeated_symbols = re.compile(r"[\*\-\_]{3,}")
+remove_repeated_whitespace = re.compile(r"\s +")
+
+
+def cleanse_text(s: str):
+    if no_emoji_output:
+        # Replace emojis with spaces
+        s = "".join(map(lambda x: x if ord(x) < 256 else " ", s))
+    # No newlines
+    s = s.replace("\n", " ")
+    # Annoying repeated symbols
+    s = re.sub(remove_repeated_symbols, " ", s)
+    # Repeated whitespace
+    return re.sub(remove_repeated_whitespace, " ", s).strip()
+
 
 def valid_columns(columns: list[str], mappings: dict):
     return all(x in mappings for x in columns)
 
 
 def parse_args():
+    def add_common_args(subparser: argparse.ArgumentParser):
+        subparser.add_argument("--limit", type=int, help="Maximum rows to display")
+        subparser.add_argument("--sort-by", nargs="+")
+        subparser.add_argument("--columns", nargs="+")
+        subparser.add_argument(
+            "--no-emojis", action="store_true", help="Remove emojis from output"
+        )
+        subparser.add_argument(
+            "-o",
+            "--output",
+            choices=["table", "lines"],
+            help="Default will choose best option",
+        )
+
     parser = argparse.ArgumentParser()
     subs = parser.add_subparsers(dest="mode")
 
     events_parser = subs.add_parser("events")
-    # Search by ID
+    add_common_args(events_parser)
+
+    # Searching by ID ignores other filtering options
     events_parser.add_argument("--id", type=int, help="Facebook event ID")
-    # or, filter on these fields
     events_parser.add_argument("--name")
     m = events_parser.add_mutually_exclusive_group()
     m.add_argument(
@@ -97,17 +132,10 @@ def parse_args():
         nargs="+",
         help="Match event if any term is in name, hosts or description",
     )
-    events_parser.add_argument("--limit", type=int, help="Maximum rows to display")
-    events_parser.add_argument("--sort-by", nargs="+")
-    events_parser.add_argument("--columns", nargs="+")
 
     clubs_parser = subs.add_parser("clubs")
-    clubs_parser.add_argument(
-        "--page", type=int, default=1, help="Page number (default 1)"
-    )
-    # Search by ID
-    clubs_parser.add_argument("--id", help="Club's ID on LinkUp or Facebook")
-    # or, filter on these fields
+    add_common_args(clubs_parser)
+
     clubs_parser.add_argument("--name")
     clubs_parser.add_argument("--categories", nargs="+")
     m = clubs_parser.add_mutually_exclusive_group()
@@ -122,9 +150,9 @@ def parse_args():
         nargs="+",
         help="Match club if any term is in name, categories or description",
     )
-    clubs_parser.add_argument("--limit", type=int, help="Maximum rows to display")
-    clubs_parser.add_argument("--sort-by", nargs="+")
-    clubs_parser.add_argument("--columns", nargs="+")
+    clubs_parser.add_argument(
+        "--page", type=int, default=1, help="Page number (default 1)"
+    )
 
     args = parser.parse_args()
 
@@ -163,6 +191,10 @@ def parse_args():
             args.columns = list(dict.fromkeys(args.columns))
         else:
             parser.error("Valid columns: " + ", ".join(mappings.keys()))
+
+    if getattr(args, "no_emojis", None) is not None and args.no_emojis:
+        global no_emoji_output
+        no_emoji_output = True
 
     return args
 
@@ -267,38 +299,30 @@ def normalise_event(event: dict) -> dict:
     return event
 
 
-def object_to_table_row(
-    obj: dict, columns: list, mappings: dict, max_width: Optional[int] = None
-) -> list[str]:
+def object_to_table_row(obj: dict, columns: list, mappings: dict) -> list[str]:
     if not columns:
         raise ValueError
     row_values = []
     for column in columns:
         mapf = mappings[column]
-        displayed_text = mapf(obj)
-        if max_width and max_width > 10:
-            displayed_text = displayed_text[:max_width]
+        displayed_text = cleanse_text(mapf(obj))
         row_values.append(displayed_text)
     return row_values
 
 
 def pprint_table(
-    table: list[list[str]], has_header: bool = False, has_footer: bool = False
+    table: list[list[str]], header: list[str], max_width: int, no_swap: bool = True
 ):
-    table = list(table)
-    col_width = [max(len(x) for x in col) for col in zip(*table)]
+    # Don't print empty tables
+    if len(table) == 0:
+        return
+
+    col_width = [max(len(x) for x in col) for col in zip(header, *table)]
     table_width = sum(col_width) + 3 * len(col_width) + 1
 
-    header = None
-    if has_header:
-        header = table.pop(0)
-
-    footer = None
-    if has_footer:
-        footer = table.pop()
-
-    if len(table) == 0:
-        table.append(["" for _ in col_width])
+    if not no_swap and table_width > max_width:
+        pprint_lines(table, header, max_width)
+        return
 
     pprint_row = lambda row: print(
         "| "
@@ -306,19 +330,60 @@ def pprint_table(
         + " |"
     )
 
-    if header:
-        print("-" * table_width)
-        pprint_row(header)
-        print("-" * table_width)
+    print("-" * table_width)
+    pprint_row(header)
+    print("-" * table_width)
 
     for line in table:
         pprint_row(line)
 
     print("-" * table_width)
 
-    if footer:
-        pprint_row(footer)
-        print("-" * table_width)
+
+def pprint_lines(table: list[list[str]], header: list[str], max_width: int):
+
+    # Don't print empty tables
+    if len(table) == 0:
+        return
+
+    left_col_width = max(len(x) for x in header)
+    right_col_width = max_width - left_col_width - 3
+    if left_col_width <= 0 or right_col_width <= 0:
+        raise ValueError("Invalid columns widths")
+
+    def print_word_buffer(buf: list[str], header_name: Optional[str]):
+        line_value = " ".join(buf)
+        if header_name is None:
+            padding = " " * (left_col_width + 3)
+            print(padding + line_value)
+        else:
+            print(f"{header_name:>{left_col_width}} = {line_value}")
+
+    for line in table:
+        for i in range(len(header)):
+            buf = []
+            words_length = 0
+            first_line = True
+            if line[i] == "":
+                print_word_buffer([], header[i])
+                continue
+            words = line[i].split(" ")
+            for word in words:
+                possible_line_length = words_length + len(word) + max(len(buf) - 1, 0)
+                if possible_line_length <= right_col_width:
+                    buf.append(word)
+                else:
+                    # Flush buffer, then add current word
+                    print_word_buffer(buf, header[i] if first_line else None)
+                    buf.clear()
+                    buf.append(word)
+                    words_length = 0
+                    first_line = False
+                words_length += len(word)
+            # There are still words in the buffer
+            if words_length > 0:
+                print_word_buffer(buf, header[i] if first_line else None)
+        print()
 
 
 def filter_events(events: list[dict], args: argparse.Namespace) -> list[dict]:
@@ -399,16 +464,14 @@ def normalise_club(club: dict) -> dict:
     return club
 
 
-def main(args: argparse.Namespace):
+def main(args: argparse.Namespace, max_width: int):
     try:
         table = []
         header = []
-        footer = None
         page_no = None
         page_count = None
         if args.mode == "events":
             header.extend(args.columns if args.columns else default_events_header)
-            table.append(header)
             if args.id is not None:
                 event = fetch_event_by_id(args.id)
                 row = object_to_table_row(event, header, event_column_value_mappings)
@@ -422,30 +485,31 @@ def main(args: argparse.Namespace):
                     events = events[: args.limit]
                 for event in events:
                     row = object_to_table_row(
-                        event, header, event_column_value_mappings, max_width=40
+                        event, header, event_column_value_mappings
                     )
                     table.append(row)
         elif args.mode == "clubs":
             header.extend(args.columns if args.columns else default_clubs_header)
-            table.append(header)
             clubs, page_no, page_count = fetch_clubs_paged(args.page)
             clubs = sort_objects(clubs, args, club_column_value_mappings, "name")
             for club in clubs:
                 row = object_to_table_row(club, header, club_column_value_mappings)
                 table.append(row)
 
-        if page_no and page_count:
-            footer = ["" for _ in header]
-            table.append(footer)
-            footer[0] = f"Page {args.page} / {page_count}"
+        if args.output == "lines":
+            pprint_lines(table, header, max_width)
+        else:
+            pprint_table(table, header, max_width, no_swap=args.output == "table")
 
-        pprint_table(
-            table, has_header=header is not None, has_footer=footer is not None
-        )
+        print(f"Total results: {len(table)}")
+
+        if len(table) > 0 and page_no and page_count:
+            print(f"Page: {page_no} of {page_count}")
+
     except RequestError as e:
         print(e.message)
         exit(1)
 
 
 if __name__ == "__main__":
-    main(parse_args())
+    main(parse_args(), 120)

@@ -54,8 +54,19 @@ class Event:
         cs = Event._columns()
         return all(x in cs for x in columns)
 
-    def __init__(self, event_obj: dict):
-        self.event = event_obj
+    def __init__(self, event_data: dict):
+        event_data = dict(event_data)
+        event_data["time_start"] = datetime.fromisoformat(event_data["time_start"])
+        event_data["time_finish"] = datetime.fromisoformat(event_data["time_finish"])
+        event_data["hosts_image"] = []
+        event_data["hosts_no_image"] = []
+        for host in event_data["hosts"]:
+            if host["image"] is None or host["image"].endswith("/default.jpg"):
+                event_data["hosts_no_image"].append(host)
+            else:
+                event_data["hosts_image"].append(host)
+        del event_data["hosts"]
+        self.event = event_data
 
     @property
     def id(self) -> str:
@@ -120,8 +131,12 @@ class Club:
         cs = Club._columns()
         return all(x in cs for x in columns)
 
-    def __init__(self, club_obj: dict):
-        self.club = club_obj
+    def __init__(self, club_data: dict):
+        club_data = dict(club_data)
+        club_data["tags"].extend(club_data["categories"])
+        club_data["tags"].sort()
+        del club_data["categories"]
+        self.club = club_data
 
     @property
     def short_name(self) -> str:
@@ -333,8 +348,8 @@ def save_cached_events(last_updated: str, raw_events: list[dict]):
 def fetch_event_by_id(uid: int) -> Event:
     try:
         response_text = request_get(event_endpoint + str(uid))
-        data = json.loads(response_text)
-        return normalise_event(data)
+        raw_event = json.loads(response_text)
+        return Event(raw_event)
     except HTTPError:
         raise RequestError("Event not found")
 
@@ -355,7 +370,7 @@ def fetch_all_events() -> list[Event]:
         except HTTPError:
             raise RequestError("Failed to load events from API")
 
-    return [normalise_event(e) for e in raw_events]
+    return [Event(e) for e in raw_events]
 
 
 def fetch_last_update_time() -> Optional[str]:
@@ -363,21 +378,6 @@ def fetch_last_update_time() -> Optional[str]:
         return request_get(events_last_updated_endpoint)
     except HTTPError:
         pass
-
-
-def normalise_event(event: dict) -> Event:
-    event["time_start"] = datetime.fromisoformat(event["time_start"])
-    event["time_finish"] = datetime.fromisoformat(event["time_finish"])
-    event["hosts_image"] = []
-    event["hosts_no_image"] = []
-    for host in event["hosts"]:
-        if host["image"] is None or host["image"].endswith("/default.jpg"):
-            event["hosts_no_image"].append(host)
-        else:
-            event["hosts_image"].append(host)
-    del event["hosts"]
-
-    return Event(event)
 
 
 def request_get(url: str) -> str:
@@ -546,16 +546,9 @@ def fetch_clubs_paged(page: int) -> tuple[list[Club], int, int]:
         page_count = response_data["nbPages"]
         if page > page_count:
             return fetch_clubs_paged(page_count)
-        return [normalise_club(x) for x in raw_clubs], page, page_count
+        return [Club(x) for x in raw_clubs], page, page_count
     except HTTPError:
         raise RequestError("Failed to load clubs from API")
-
-
-def normalise_club(club: dict) -> Club:
-    club["tags"].extend(club["categories"])
-    club["tags"].sort()
-    del club["categories"]
-    return Club(club)
 
 
 def main(args: argparse.Namespace, max_width: int):

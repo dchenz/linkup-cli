@@ -334,7 +334,9 @@ def load_cached_events(last_updated: str) -> Optional[list]:
             return None
         return cached["events"]
     except Exception:
-        return None
+        # If cache fails, fetch new data from API
+        # Should be transparent to user
+        pass
 
 
 def save_cached_events(last_updated: str, raw_events: list[dict]):
@@ -342,6 +344,7 @@ def save_cached_events(last_updated: str, raw_events: list[dict]):
         with open(cache_events_path, "w") as f:
             json.dump({"last_updated": last_updated, "events": raw_events}, f)
     except Exception:
+        # Should be transparent to user
         pass
 
 
@@ -354,13 +357,14 @@ def fetch_event_by_id(uid: int) -> Event:
         raise RequestError("Event not found")
 
 
-def fetch_all_events() -> list[Event]:
+def fetch_all_events() -> tuple[list[Event], Optional[str]]:
     last_updated = fetch_last_update_time()
 
     if last_updated:
         raw_events = load_cached_events(last_updated)
     else:
         raw_events = None
+
     if not raw_events:
         try:
             response_text = request_get(events_endpoint)
@@ -370,12 +374,13 @@ def fetch_all_events() -> list[Event]:
         except HTTPError:
             raise RequestError("Failed to load events from API")
 
-    return [Event(e) for e in raw_events]
+    return [Event(e) for e in raw_events], last_updated
 
 
 def fetch_last_update_time() -> Optional[str]:
     try:
-        return request_get(events_last_updated_endpoint)
+        s = request_get(events_last_updated_endpoint)
+        return s.strip('"')
     except HTTPError:
         pass
 
@@ -557,6 +562,7 @@ def main(args: argparse.Namespace, max_width: int):
         header = []
         page_no = None
         page_count = None
+        last_update = None
         if args.mode == "events":
             header.extend(args.columns if args.columns else default_events_header)
             if args.id is not None:
@@ -564,7 +570,8 @@ def main(args: argparse.Namespace, max_width: int):
                 row = to_table_row(event, header, args.no_emojis)
                 table.append(row)
             else:
-                events = filter_events(fetch_all_events(), args)
+                events, last_update = fetch_all_events()
+                events = filter_events(events, args)
                 events = sort_objects(events, args, default_event_sort)  # type: ignore
                 if args.limit:
                     events = events[: args.limit]
@@ -588,6 +595,9 @@ def main(args: argparse.Namespace, max_width: int):
 
         if len(table) > 0 and page_no and page_count:
             print(f"Page: {page_no} of {page_count}")
+
+        if last_update:
+            print(f"Last updated: {last_update}")
 
     except RequestError as e:
         print(e.message)

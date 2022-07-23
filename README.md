@@ -37,6 +37,7 @@ linkup events
 # Filter events by matching attributes that contain something
 linkup events --name bbq
 linkup events --host csesoc
+linkup events --description finance
 
 # Filter events by searching multiple attributes
 # (name, hosts, categories, description)
@@ -98,20 +99,23 @@ Available columns:
 - facebook_group
 
 ```sh
-# Get clubs
+# Get all clubs
 # As of now, there are 19 pages with 300+ clubs
 linkup clubs
-linkup clubs -p 1
 
-# Some functions can still be used
+# Filter clubs by matching attributes that contain something
+linkup clubs --name csesoc
+linkup clubs --description finance
+
+# Supports the same ordering and selection functions
 linkup clubs \
     -o lines \
-    --select name facebook description \
+    --select name short_name facebook description \
     --order-by _name \
     --limit 5 \
     --no-emojis
 ```
 
 Note:
-- There are limited filtering/search functions for clubs because the "Get Clubs" API is paged.
 - Some fields have been omitted (e.g. membership fees), change the source code if you'd like to include them.
+- Some fields aren't supported as filters, (e.g. location), but they can be displayed using ``--select``.

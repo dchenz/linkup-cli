@@ -1,9 +1,9 @@
 #!/usr/bin/python3
 
-import argparse
 import json
 import os
 import re
+from argparse import ArgumentParser, Namespace
 from datetime import datetime
 from typing import Optional, Union
 from urllib.error import HTTPError
@@ -16,11 +16,12 @@ events_endpoint = "https://dev-api.linkupevents.com.au/events?uni=unsw"
 events_last_updated_endpoint = (
     "https://dev-api.linkupevents.com.au/last-updated?uni=unsw"
 )
-clubs_paged_endpoint = "https://api.linkupevents.com.au/unsw/clubs?page="
+clubs_endpoint = "https://api.linkupevents.com.au/unsw/clubs?hitsPerPage=1000000"
 
 # File to save cached events data
 cache_path = os.path.join(os.path.expanduser("~"), ".cache", "linkup")
 cache_events_path = os.path.join(cache_path, "events.json")
+cache_clubs_path = os.path.join(cache_path, "clubs.json")
 
 # These columns must be @property in their respective classes
 default_events_header = ["name", "hosts", "start", "facebook"]
@@ -29,6 +30,8 @@ default_event_sort = "start"
 default_club_sort = "name"
 
 date_format = r"%Y-%m-%d %H:%M"
+ISO = datetime.fromisoformat
+now_dt = datetime.now()
 
 
 class RequestError(Exception):
@@ -112,6 +115,12 @@ class Event:
     def description(self) -> str:
         return self.event["description"] if self.event["description"] else ""
 
+    def __str__(self) -> str:
+        return self.name
+
+    def __repr__(self) -> str:
+        return self.__str__()
+
 
 class Club:
 
@@ -172,6 +181,12 @@ class Club:
     def facebook_group(self) -> str:
         return self.club["socials"].get("facebook_group", "")
 
+    def __str__(self) -> str:
+        return self.name
+
+    def __repr__(self) -> str:
+        return self.__str__()
+
 
 ClubOrEvent = Union[Club, Event]
 
@@ -192,27 +207,20 @@ def cleanse_text(s: str, no_emojis: bool) -> str:
     return re.sub(remove_repeated_whitespace, " ", s).strip()
 
 
-def parse_args() -> argparse.Namespace:
-    def add_common_args(subparser: argparse.ArgumentParser):
+def parse_args() -> Namespace:
+    def add_common_args(subparser: ArgumentParser):
         subparser.add_argument("--limit", type=int, help="Maximum rows to display")
         subparser.add_argument("--order-by", nargs="+")
         subparser.add_argument("--columns", "--select", nargs="+")
-        subparser.add_argument(
-            "--no-emojis", action="store_true", help="Remove emojis from output"
-        )
-        subparser.add_argument(
-            "-o",
-            "--output",
-            choices=["table", "lines"],
-            help="Default will choose best option",
-        )
+        subparser.add_argument("--no-emojis", action="store_true")
+        subparser.add_argument("-o", "--output", choices=["table", "lines"])
 
     # ---- Main parser ----
 
     help_text = (
-        f"Welcome to the LinkUp CLI. A web version is available at {website_url}"
+        "Welcome to the LinkUp CLI. " f"A web version is available at {website_url}"
     )
-    parser = argparse.ArgumentParser(description=help_text)
+    parser = ArgumentParser(description=help_text)
     subs = parser.add_subparsers(dest="mode")
 
     # ---- Events subparser ----
@@ -222,25 +230,14 @@ def parse_args() -> argparse.Namespace:
     add_common_args(events_parser)
 
     events_parser.add_argument("--id", type=int, help="Facebook event ID")
-    events_parser.add_argument("--name")
     m = events_parser.add_mutually_exclusive_group()
-    m.add_argument(
-        "--before", type=datetime.fromisoformat, help="Starts before 2022-01-31T09:30"
-    )
-    m.add_argument(
-        "--after", type=datetime.fromisoformat, help="Starts after 2022-01-31T09:30"
-    )
-    m.add_argument(
-        "--date",
-        type=datetime.fromisoformat,
-        help="Starts on 2022-01-31 (time is ignored)",
-    )
+    m.add_argument("--before", type=ISO, help="Format: 2022-01-31T09:30")
+    m.add_argument("--after", type=ISO, help="Format: 2022-01-31T09:30")
+    m.add_argument("--date", type=ISO, help="Format: 2022-01-31")
+    events_parser.add_argument("--name")
     events_parser.add_argument("--host")
-    events_parser.add_argument(
-        "--search",
-        nargs="+",
-        help="Match event if any term is in name, hosts or description",
-    )
+    events_parser.add_argument("--description")
+    events_parser.add_argument("--search")
 
     # ---- Clubs subparser ----
 
@@ -248,9 +245,9 @@ def parse_args() -> argparse.Namespace:
     clubs_parser = subs.add_parser("clubs", description=help_text)
     add_common_args(clubs_parser)
 
-    clubs_parser.add_argument(
-        "-p", "--page", type=int, default=1, help="Page number (default 1)"
-    )
+    clubs_parser.add_argument("--name")
+    clubs_parser.add_argument("--description")
+    clubs_parser.add_argument("--search")
 
     # ---- End parsing and validate ----
 
@@ -271,10 +268,14 @@ def parse_args() -> argparse.Namespace:
         parser.error("--limit must be a positive integer")
 
     if getattr(args, "search", None) is not None:
-        if getattr(args, "name", None) or getattr(args, "host", None):
-            # --search already includes text from "name" and "hosts"
+        if (
+            getattr(args, "name", None)
+            or getattr(args, "host", None)
+            or getattr(args, "description", None)
+        ):
+            # --search already includes text from these attributes
             # hence it doesn't make sense to have them together
-            parser.error("--search cannot be used with --name or --host")
+            parser.error("--search cannot be used with --name, --host, --description")
 
     if getattr(args, "order_by", None) is not None:
         try:
@@ -286,9 +287,6 @@ def parse_args() -> argparse.Namespace:
                 raise ValueError("Valid columns: " + ", ".join(available_columns))
         except ValueError as e:
             parser.error(str(e))
-
-    if getattr(args, "page", None) is not None and args.page <= 0:
-        parser.error("--page must be a positive integer")
 
     if getattr(args, "columns", None) is not None:
         if validate_columns(args.columns):
@@ -324,72 +322,6 @@ def validate_sort_columns(order_by: list[str]) -> list[tuple]:
                 check_dupes[col] = False
 
     return order_by_directions
-
-
-def load_cached_events(last_updated: str) -> Optional[list]:
-    try:
-        with open(cache_events_path, "r") as f:
-            cached = json.load(f)
-        if cached["last_updated"] != last_updated:
-            return None
-        return cached["events"]
-    except Exception:
-        # If cache fails, fetch new data from API
-        # Should be transparent to user
-        pass
-
-
-def save_cached_events(last_updated: str, raw_events: list[dict]):
-    try:
-        with open(cache_events_path, "w") as f:
-            json.dump({"last_updated": last_updated, "events": raw_events}, f)
-    except Exception:
-        # Should be transparent to user
-        pass
-
-
-def fetch_event_by_id(uid: int) -> Event:
-    try:
-        response_text = request_get(event_endpoint + str(uid))
-        raw_event = json.loads(response_text)
-        return Event(raw_event)
-    except HTTPError:
-        raise RequestError("Event not found")
-
-
-def fetch_all_events() -> tuple[list[Event], Optional[str]]:
-    last_updated = fetch_last_update_time()
-
-    if last_updated:
-        raw_events = load_cached_events(last_updated)
-    else:
-        raw_events = None
-
-    if not raw_events:
-        try:
-            response_text = request_get(events_endpoint)
-            raw_events = json.loads(response_text)
-            if last_updated:
-                save_cached_events(last_updated, raw_events)
-        except HTTPError:
-            raise RequestError("Failed to load events from API")
-
-    return [Event(e) for e in raw_events], last_updated
-
-
-def fetch_last_update_time() -> Optional[str]:
-    try:
-        s = request_get(events_last_updated_endpoint)
-        return s.strip('"')
-    except HTTPError:
-        pass
-
-
-def request_get(url: str) -> str:
-    r = Request(url)
-    r.add_header("User-Agent", "linkup-cli")
-    with urlopen(r) as response:
-        return response.read().decode("utf-8")
 
 
 def to_table_row(obj: ClubOrEvent, columns: list[str], no_emojis: bool) -> list[str]:
@@ -483,44 +415,83 @@ def pprint_lines(table: list[list[str]], header: list[str], max_width: int):
         print()
 
 
-def filter_events(events: list[Event], args: argparse.Namespace) -> list[Event]:
+def filter_events(events: list[Event], args: Namespace) -> list[Event]:
     # No filtering arguments used so just return here
     if not (
-        args.name or args.host or args.before or args.after or args.date or args.search
+        args.name
+        or args.host
+        or args.before
+        or args.after
+        or args.date
+        or args.search
+        or args.description
     ):
         return events
 
+    name_fields = ["name"]
+    hosts_fields = ["hosts"]
+    desc_fields = ["description"]
+    search_all_fields = ["name", "hosts", "description", "categories"]
+
     matched = []
     for event in events:
-        if args.name and args.name.lower() not in event.name.lower():
-            continue
+        if args.name:
+            if attribute_not_match(event, args.name, name_fields):
+                continue
         if args.host:
-            if args.host.lower() not in event.hosts.lower():
+            if attribute_not_match(event, args.host, hosts_fields):
+                continue
+        if args.description:
+            if attribute_not_match(event, args.description, desc_fields):
                 continue
         if args.search:
-            search_text = " ".join(
-                [event.hosts, event.name, event.description, event.categories]
-            )
-            any_matches = False
-            for term in args.search:
-                if term.lower() in search_text.lower():
-                    any_matches = True
-                    break
-            if not any_matches:
+            if attribute_not_match(event, args.search, search_all_fields):
                 continue
-        if args.before and event.event["time_start"] >= args.before:
-            continue
-        if args.after and event.event["time_start"] <= args.after:
-            continue
-        if args.date and event.event["time_start"].date() != args.date.date():
-            continue
+        if args.before:
+            if event.event["time_start"] >= args.before:
+                continue
+        if args.after:
+            if event.event["time_start"] <= args.after:
+                continue
+        if args.date:
+            if event.event["time_start"].date() != args.date.date():
+                continue
         matched.append(event)
 
     return matched
 
 
+def filter_clubs(clubs: list[Club], args: Namespace) -> list[Club]:
+    if not (args.name or args.description or args.search):
+        return clubs
+
+    name_fields = ["name", "short_name"]
+    desc_fields = ["description"]
+    search_all_fields = ["name", "short_name", "description"]
+
+    matched = []
+    for club in clubs:
+        if args.name:
+            if attribute_not_match(club, args.name, name_fields):
+                continue
+        if args.description:
+            if attribute_not_match(club, args.description, desc_fields):
+                continue
+        if args.search:
+            if attribute_not_match(club, args.search, search_all_fields):
+                continue
+        matched.append(club)
+
+    return matched
+
+
+def attribute_not_match(obj: ClubOrEvent, expected: str, attrs: list[str]) -> bool:
+    actual_values = " ".join(getattr(obj, attr) for attr in attrs)
+    return expected.lower() not in actual_values.lower()
+
+
 def sort_objects(
-    objs: list[ClubOrEvent], args: argparse.Namespace, default_key: str
+    objs: list[ClubOrEvent], args: Namespace, default_key: str
 ) -> list[ClubOrEvent]:
 
     # Sort by default
@@ -531,7 +502,8 @@ def sort_objects(
     def create_sort_key(obj: ClubOrEvent) -> tuple:
         keys = []
         for col, reverse in args.order_by:
-            text_value = getattr(obj, col)
+            # Sort by lowercase string
+            text_value = getattr(obj, col).lower()
             key = tuple((-ord(x) if reverse else ord(x)) for x in text_value)
             keys.append(key)
         return tuple(keys)
@@ -540,51 +512,140 @@ def sort_objects(
     return sorted(objs, key=create_sort_key)
 
 
-def fetch_clubs_paged(page: int) -> tuple[list[Club], int, int]:
-    # Page argument is 1-indexed
+def request_get(url: str) -> str:
+    r = Request(url)
+    r.add_header("User-Agent", "linkup-cli")
+    with urlopen(r) as response:
+        return response.read().decode("utf-8")
+
+
+def fetch_event_by_id(uid: int) -> Event:
     try:
-        response_text = request_get(clubs_paged_endpoint + str(page - 1))
-        response_data = json.loads(response_text)
-        if not response_data["is_success"]:
-            raise RequestError("Failed to load clubs from API")
-        raw_clubs = response_data["clubs"]
-        page_count = response_data["nbPages"]
-        if page > page_count:
-            return fetch_clubs_paged(page_count)
-        return [Club(x) for x in raw_clubs], page, page_count
+        response_text = request_get(event_endpoint + str(uid))
+        raw_event = json.loads(response_text)
+        return Event(raw_event)
     except HTTPError:
-        raise RequestError("Failed to load clubs from API")
+        raise RequestError("Event not found")
 
 
-def main(args: argparse.Namespace, max_width: int):
+def fetch_all_events() -> tuple[list[Event], Optional[str]]:
+    last_updated = fetch_last_update_time()
+
+    if last_updated:
+        raw_events = load_cached_events(last_updated)
+    else:
+        raw_events = None
+
+    if not raw_events:
+        try:
+            response_text = request_get(events_endpoint)
+            raw_events = json.loads(response_text)
+            if last_updated:
+                save_cached_events(last_updated, raw_events)
+        except HTTPError:
+            raise RequestError("Failed to load events from API")
+
+    return [Event(e) for e in raw_events], last_updated
+
+
+def fetch_last_update_time() -> Optional[str]:
     try:
-        table = []
+        s = request_get(events_last_updated_endpoint)
+        return s.strip('"')
+    except HTTPError:
+        pass
+
+
+def fetch_all_clubs() -> list[Club]:
+    raw_clubs = load_cached_clubs()
+    if not raw_clubs:
+        try:
+            response_text = request_get(clubs_endpoint)
+            club_page_response = json.loads(response_text)
+            if not club_page_response["is_success"]:
+                raise RequestError("Failed to load clubs from API")
+            raw_clubs = club_page_response["clubs"]
+            save_cached_clubs(raw_clubs)
+        except HTTPError:
+            raise RequestError("Failed to load clubs from API")
+    return [Club(x) for x in raw_clubs]
+
+
+def load_cached_events(last_updated: str) -> Optional[list]:
+    try:
+        with open(cache_events_path, "r") as f:
+            cached = json.load(f)
+        if cached["last_updated"] != last_updated:
+            return None
+        return cached["events"]
+    except Exception:
+        # If cache fails, fetch new data from API
+        # Should be transparent to user
+        pass
+
+
+def save_cached_events(last_updated: str, raw_events: list[dict]):
+    try:
+        with open(cache_events_path, "w") as f:
+            json.dump({"last_updated": last_updated, "events": raw_events}, f)
+    except Exception:
+        # Should be transparent to user
+        pass
+
+
+def load_cached_clubs(max_stale_days: int = 14) -> Optional[list]:
+    try:
+        with open(cache_clubs_path, "r") as f:
+            cached = json.load(f)
+        ts_dt = datetime.strptime(cached["timestamp"], date_format)
+        if (now_dt - ts_dt).days >= max_stale_days:
+            return None
+        return cached["data"]
+    except Exception:
+        # If cache fails, fetch new data from API
+        # Should be transparent to user
+        pass
+
+
+def save_cached_clubs(raw_clubs: list[dict]):
+    try:
+        with open(cache_clubs_path, "w") as f:
+            ts = now_dt.strftime(date_format)
+            json.dump({"timestamp": ts, "data": raw_clubs}, f)
+    except Exception as e:
+        # Should be transparent to user
+        pass
+
+
+def main(args: Namespace, max_width: int):
+    try:
         header = []
-        page_no = None
-        page_count = None
+        items = []
         last_update = None
+
         if args.mode == "events":
             header.extend(args.columns if args.columns else default_events_header)
-            if args.id is not None:
-                event = fetch_event_by_id(args.id)
-                row = to_table_row(event, header, args.no_emojis)
-                table.append(row)
-            else:
+            if args.id is None:
+                # Search on all events
                 events, last_update = fetch_all_events()
                 events = filter_events(events, args)
                 events = sort_objects(events, args, default_event_sort)  # type: ignore
-                if args.limit:
-                    events = events[: args.limit]
-                for event in events:
-                    row = to_table_row(event, header, args.no_emojis)
-                    table.append(row)
+                items.extend(events)
+            else:
+                # Search by event ID
+                items.append(fetch_event_by_id(args.id))
+
         elif args.mode == "clubs":
             header.extend(args.columns if args.columns else default_clubs_header)
-            clubs, page_no, page_count = fetch_clubs_paged(args.page)
+            clubs = fetch_all_clubs()
+            clubs = filter_clubs(clubs, args)
             clubs = sort_objects(clubs, args, default_club_sort)  # type: ignore
-            for club in clubs:
-                row = to_table_row(club, header, args.no_emojis)
-                table.append(row)
+            items.extend(clubs)
+
+        if args.limit:
+            items = items[: args.limit]
+
+        table = [to_table_row(x, header, args.no_emojis) for x in items]
 
         if args.output == "lines":
             pprint_lines(table, header, max_width)
@@ -592,9 +653,6 @@ def main(args: argparse.Namespace, max_width: int):
             pprint_table(table, header, max_width, no_swap=args.output == "table")
 
         print(f"Total results: {len(table)}")
-
-        if len(table) > 0 and page_no and page_count:
-            print(f"Page: {page_no} of {page_count}")
 
         if last_update:
             print(f"Last updated: {last_update}")

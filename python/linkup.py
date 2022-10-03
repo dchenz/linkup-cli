@@ -167,7 +167,14 @@ class Club:
 
     @property
     def website(self) -> str:
-        return self.club["socials"].get("website", "")
+        url = self.club["socials"].get("website")
+        if not url:
+            return ""
+        if url.startswith("http://"):
+            return f"https://{url[7:]}"
+        if not url.startswith("https://"):
+            return f"https://{url}"
+        return url
 
     @property
     def email(self) -> str:

@@ -1,4 +1,7 @@
 # The LinkUp CLI
+
+# DEPRECATED - the API no longer works
+
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
 Because why not?!
@@ -16,6 +19,7 @@ Python 3.7+
 ### Events
 
 Available columns:
+
 - id
 - facebook
 - name
@@ -89,6 +93,7 @@ linkup events \
 ### Clubs
 
 Available columns:
+
 - short_name
 - name
 - description
@@ -117,5 +122,6 @@ linkup clubs \
 ```
 
 Note:
+
 - Some fields have been omitted (e.g. membership fees), change the source code if you'd like to include them.
-- Some fields aren't supported as filters, (e.g. location), but they can be displayed using ``--select``.
+- Some fields aren't supported as filters, (e.g. location), but they can be displayed using `--select`.
